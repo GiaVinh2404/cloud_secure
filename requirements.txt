@@ -1,0 +1,19 @@
+# RL environment
+gym
+pettingzoo
+
+# Core ML/AI
+numpy
+pandas
+torch
+scikit-learn
+
+# Data processing helpers
+fastai
+fastcore
+fastparquet   # cần cho parquet, có thể thay bằng fastparquet nếu muốn
+
+# Optional but useful
+tqdm         # progress bar
+matplotlib   # vẽ biểu đồ
+seaborn      # visualization nâng cao

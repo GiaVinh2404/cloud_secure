@@ -1,0 +1,5 @@
+# General settings for RL project
+EPISODES = 1000
+LEARNING_RATE = 0.001
+GAMMA = 0.99
+EPSILON_DECAY = 0.995

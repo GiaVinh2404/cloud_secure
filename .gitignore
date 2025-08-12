@@ -1,0 +1,4 @@
+venv
+inference_results.csv
+data
+__pycache__

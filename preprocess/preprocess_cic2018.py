@@ -3,8 +3,9 @@ Tiền xử lý dữ liệu CSE-CIC-IDS2018:
 - Đọc tất cả file CSV trong data/raw
 - Chuẩn hóa tên cột
 - Loại bỏ cột không cần
-- Chuẩn hóa label
+- Chuẩn hóa label (0: Benign, 1: Attack)
 - Loại bỏ NaN, giá trị vô cực, trùng lặp
+- Cân bằng dữ liệu (nếu cần)
 - Ép kiểu an toàn trước khi lưu
 - Lưu sang định dạng Parquet để train nhanh hơn
 """
@@ -15,111 +16,52 @@ import pandas as pd
 from fastai.tabular.all import df_shrink
 from fastcore.parallel import parallel
 
-# ==========================
-# Cấu hình thư mục
-# ==========================
 RAW_DATA_DIR = "data/raw"
 PROCESSED_DATA_DIR = "data/processed"
-
 os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
-# ==========================
-# Mapping tên cột
-# ==========================
 col_name_consistency = {
-    'Flow ID': 'Flow ID',
-    'Source IP': 'Source IP',
-    'Src IP': 'Source IP',
-    'Source Port': 'Source Port',
-    'Src Port': 'Source Port',
-    'Destination IP': 'Destination IP',
-    'Dst IP': 'Destination IP',
-    'Destination Port': 'Destination Port',
-    'Dst Port': 'Destination Port',
-    'Protocol': 'Protocol',
-    'Timestamp': 'Timestamp',
-    'Flow Duration': 'Flow Duration',
-    'Total Fwd Packets': 'Total Fwd Packets',
-    'Tot Fwd Pkts': 'Total Fwd Packets',
-    'Total Backward Packets': 'Total Backward Packets',
-    'Tot Bwd Pkts': 'Total Backward Packets',
-    'Total Length of Fwd Packets': 'Fwd Packets Length Total',
-    'TotLen Fwd Pkts': 'Fwd Packets Length Total',
-    'Total Length of Bwd Packets': 'Bwd Packets Length Total',
-    'TotLen Bwd Pkts': 'Bwd Packets Length Total',
-    'Fwd Packet Length Max': 'Fwd Packet Length Max',
-    'Fwd Pkt Len Max': 'Fwd Packet Length Max',
-    'Fwd Packet Length Min': 'Fwd Packet Length Min',
-    'Fwd Pkt Len Min': 'Fwd Packet Length Min',
-    'Fwd Packet Length Mean': 'Fwd Packet Length Mean',
-    'Fwd Pkt Len Mean': 'Fwd Packet Length Mean',
-    'Fwd Packet Length Std': 'Fwd Packet Length Std',
-    'Fwd Pkt Len Std': 'Fwd Packet Length Std',
-    'Bwd Packet Length Max': 'Bwd Packet Length Max',
-    'Bwd Pkt Len Max': 'Bwd Packet Length Max',
-    'Bwd Packet Length Min': 'Bwd Packet Length Min',
-    'Bwd Pkt Len Min': 'Bwd Packet Length Min',
-    'Bwd Packet Length Mean': 'Bwd Packet Length Mean',
-    'Bwd Pkt Len Mean': 'Bwd Packet Length Mean',
-    'Bwd Packet Length Std': 'Bwd Packet Length Std',
-    'Bwd Pkt Len Std': 'Bwd Packet Length Std',
-    'Flow Bytes/s': 'Flow Bytes/s',
-    'Flow Byts/s': 'Flow Bytes/s',
-    'Flow Packets/s': 'Flow Packets/s',
-    'Flow Pkts/s': 'Flow Packets/s',
-    'Flow IAT Mean': 'Flow IAT Mean',
-    'Flow IAT Std': 'Flow IAT Std',
-    'Flow IAT Max': 'Flow IAT Max',
-    'Flow IAT Min': 'Flow IAT Min',
-    'Fwd IAT Total': 'Fwd IAT Total',
-    'Fwd IAT Tot': 'Fwd IAT Total',
-    'Fwd IAT Mean': 'Fwd IAT Mean',
-    'Fwd IAT Std': 'Fwd IAT Std',
-    'Fwd IAT Max': 'Fwd IAT Max',
-    'Fwd IAT Min': 'Fwd IAT Min',
-    'Bwd IAT Total': 'Bwd IAT Total',
-    'Bwd IAT Tot': 'Bwd IAT Total',
-    'Bwd IAT Mean': 'Bwd IAT Mean',
-    'Bwd IAT Std': 'Bwd IAT Std',
-    'Bwd IAT Max': 'Bwd IAT Max',
-    'Bwd IAT Min': 'Bwd IAT Min',
-    'Label': 'Label'
+    # ...giữ nguyên như bạn đã mapping...
+    # (bạn có thể copy lại phần mapping cột ở trên)
 }
 
 drop_columns = [
-    "Flow ID",
-    'Fwd Header Length.1',
-    "Source IP", "Src IP",
-    "Source Port", "Src Port",
-    "Destination IP", "Dst IP",
-    "Destination Port", "Dst Port",
+    "Flow ID", 'Fwd Header Length.1',
+    "Source IP", "Src IP", "Source Port", "Src Port",
+    "Destination IP", "Dst IP", "Destination Port", "Dst Port",
     "Timestamp"
 ]
 
-# ==========================
-# Hàm xử lý từng file
-# ==========================
+def normalize_label(label):
+    """Chuyển label về 0 (Benign) và 1 (Attack)"""
+    if str(label).strip().lower() in ["benign", "benign\n", "0", "normal"]:
+        return 0
+    return 1
+
 def process_csv(path):
     print(f"📂 Đang xử lý: {path}")
     df = pd.read_csv(path, sep=",", encoding="utf-8")
-
-    # Chuẩn hóa tên cột
     df.columns = df.columns.str.strip()
     df.rename(columns=col_name_consistency, inplace=True)
     df.drop(columns=drop_columns, inplace=True, errors="ignore")
 
     # Chuẩn hóa label
     df['Label'] = df['Label'].replace({'BENIGN': 'Benign'})
+    df['Label'] = df['Label'].apply(normalize_label)
 
-    # Fix lỗi pyarrow: ép toàn bộ category -> string
-    for col in df.select_dtypes(include='category').columns:
-        df[col] = df[col].astype(str)
+    # Ép toàn bộ các cột (trừ Label) về float nếu có thể, nếu không thì về string
+    for col in df.columns:
+        if col != 'Label':
+            try:
+                df[col] = pd.to_numeric(df[col], errors='raise')
+            except Exception:
+                df[col] = df[col].astype(str)
 
     # Xử lý cột Protocol: giữ dạng string hoặc int an toàn
     if 'Protocol' in df.columns:
         try:
             df['Protocol'] = pd.to_numeric(df['Protocol'], errors='raise').astype(np.int32)
-        except ValueError:
+        except Exception:
             df['Protocol'] = df['Protocol'].astype(str)
 
     # Loại bỏ giá trị vô cực và NaN
@@ -137,13 +79,9 @@ def process_csv(path):
     filename = os.path.basename(path).replace(".csv", ".parquet")
     save_path = os.path.join(PROCESSED_DATA_DIR, filename)
     df.to_parquet(save_path, index=False, engine="pyarrow")
-
     print(f"✅ Lưu xong: {save_path}")
     return save_path
 
-# ==========================
-# Chạy xử lý toàn bộ
-# ==========================
 if __name__ == "__main__":
     csv_files = [
         os.path.join(RAW_DATA_DIR, f)
@@ -155,4 +93,16 @@ if __name__ == "__main__":
         print("⚠ Không tìm thấy file CSV trong thư mục data/raw")
     else:
         processed_paths = parallel(process_csv, csv_files, progress=True)
-        print("🎯 Hoàn thành xử lý tất cả file.")
+        # Gộp lại thành 1 file parquet lớn và cân bằng dữ liệu nếu cần
+        dfs = [pd.read_parquet(p) for p in processed_paths]
+        df_all = pd.concat(dfs, ignore_index=True)
+        # Cân bằng dữ liệu (optional, nếu dữ liệu lệch nhiều)
+        min_count = min(df_all["Label"].value_counts().values)
+        df_balanced = pd.concat([
+            df_all[df_all["Label"] == 0].sample(min_count, random_state=42),
+            df_all[df_all["Label"] == 1].sample(min_count, random_state=42)
+        ], ignore_index=True)
+        df_balanced = df_shrink(df_balanced)
+        final_path = os.path.join(PROCESSED_DATA_DIR, "cic2018_processed.parquet")
+        df_balanced.to_parquet(final_path, index=False)
+        print(f"🎯 Đã lưu file tổng hợp cân bằng: {final_path}")

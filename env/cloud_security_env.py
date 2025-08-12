@@ -1,73 +1,43 @@
-import os
-import glob
 import numpy as np
-import pandas as pd
-from pettingzoo.utils.agent_selector import agent_selector
-from pettingzoo.utils.env import AECEnv
 from gymnasium.spaces import Discrete, Box
+from pettingzoo.utils import agent_selector
+from pettingzoo.utils.env import AECEnv
 
 class CloudSecurityEnv(AECEnv):
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, data_dir="data/processed", attack_ratio=0.3 , max_steps=1000):
+    def __init__(self, max_steps=1000):
         super().__init__()
-        self.attack_ratio = attack_ratio
         self.max_steps = max_steps
 
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        data_path = os.path.join(base_dir, data_dir, "*.parquet")
-        all_files = glob.glob(data_path)
-
-        if not all_files:
-            raise FileNotFoundError(f"Không tìm thấy file parquet ở {data_path}")
-
-        df_list = [pd.read_parquet(f) for f in all_files]
-        df = pd.concat(df_list, ignore_index=True)
-
-        # Chuẩn hóa label: 0 cho Benign, 1 cho Attack
-        df["Label"] = df["Label"].replace({"BENIGN": "Benign", "Benign": 0}).apply(lambda x: 0 if x == 0 or x == "Benign" else 1)
-
-        self.feature_cols = [
-            "Flow Duration",
-            "Total Fwd Packets", "Total Backward Packets",
-            "Fwd Packet Length Min", "Fwd Packet Length Mean", "Bwd Packet Length Mean",
-            "Flow IAT Mean", "Flow IAT Std", "Fwd IAT Total", "Bwd IAT Total"
-        ]
-
-        # Kiểm tra cột thiếu
-        missing_cols = [col for col in self.feature_cols if col not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Thiếu các cột đặc trưng: {missing_cols}")
-
-        features = df[self.feature_cols].fillna(0).astype(np.float32).values
-        self.min_vals = features.min(axis=0)
-        self.max_vals = features.max(axis=0)
-        self.base_features = (features - self.min_vals) / (self.max_vals - self.min_vals + 1e-9)
-        self.base_labels = df["Label"].values.astype(np.int32)
-
-        self.possible_agents = ["predictor_agent", "action_agent"]
-        self.agent_selector = agent_selector(self.possible_agents)
-
-        self.observation_spaces = {
-            "predictor_agent": Box(low=0, high=1, shape=(len(self.feature_cols),), dtype=np.float32),
-            "action_agent": Box(low=0, high=1, shape=(len(self.feature_cols) + 1,), dtype=np.float32)
+        self.attack_types = {
+            0: "benign",
+            1: "sql_injection",
+            2: "xss_attack",
+            3: "dos_attack",
+            # có thể mở rộng thêm
         }
+
+        self.possible_agents = ["attacker_agent", "predictor_agent", "action_agent"]
+        self.agent_selector = agent_selector.AgentSelector(self.possible_agents)
+
+        # observation space attacker: có thể là một vector đại diện kiểu tấn công hoặc một scalar loại tấn công
+        self.observation_spaces = {
+            "attacker_agent": Box(low=0, high=1, shape=(len(self.attack_types),), dtype=np.float32),
+            "predictor_agent": Box(low=0, high=1, shape=(10,), dtype=np.float32),  # giả định feature vector 10 chiều
+            "action_agent": Box(low=0, high=1, shape=(11,), dtype=np.float32),  # thêm 1 cho prediction info
+        }
+        # attacker chọn loại tấn công từ 0 đến 3 (4 loại)
         self.action_spaces = {
+            "attacker_agent": Discrete(len(self.attack_types)),
             "predictor_agent": Discrete(2),
             "action_agent": Discrete(2)
         }
 
+        self.current_request_vector = None
+        self.current_label = 0  # 0 benign, >0 attack_type
+
     def reset(self, seed=None, options=None):
-        # Khởi tạo lại môi trường
-        rng = np.random.default_rng(seed)
-        perm = rng.permutation(len(self.base_features))
-        self.features = self.base_features[perm]
-        self.labels = self.base_labels[perm]
-
-        if self.attack_ratio is not None:
-            mask = rng.random(len(self.features)) < self.attack_ratio
-            self.labels = np.where(mask, 1, 0)
-
         self.agents = self.possible_agents[:]
         self.agent_selector.reinit(self.agents)
         self.agent_selection = self.agent_selector.next()
@@ -77,117 +47,98 @@ class CloudSecurityEnv(AECEnv):
         self.terminations = {agent: False for agent in self.agents}
         self.truncations = {agent: False for agent in self.agents}
         self.infos = {agent: {} for agent in self.agents}
+
         self.last_prediction = None
-        self.idx = 0
         self.step_count = 0
 
-        # Reset streak tracking
-        self.correct_streak = {agent: 0 for agent in self.possible_agents}
-        self.last_actions = {agent: None for agent in self.possible_agents}
+        # Tạo request đầu tiên mặc định benign
+        self.current_request_vector = np.zeros(len(self.attack_types), dtype=np.float32)
+        self.current_label = 0
 
     def observe(self, agent):
-        if self.idx >= len(self.features):
-            return None
-        if agent == "predictor_agent":
-            return self.features[self.idx]
+        if agent == "attacker_agent":
+            # attacker nhìn vector tấn công hiện tại (one-hot)
+            return self.current_request_vector
+        elif agent == "predictor_agent":
+            # predictor nhận vector đặc trưng mô phỏng từ attacker tạo
+            # Ví dụ convert attack type sang vector đặc trưng (giả lập)
+            base_vector = np.random.rand(10) * 0.1  # baseline benign noise
+            if self.current_label > 0:
+                base_vector += np.eye(10)[self.current_label % 10] * 0.8  # tạo đặc trưng attack kiểu tương ứng
+            return base_vector.astype(np.float32)
         elif agent == "action_agent":
             pred_info = np.array([self.last_prediction if self.last_prediction is not None else 0], dtype=np.float32)
-            return np.concatenate([self.features[self.idx], pred_info])
+            predictor_obs = self.observe("predictor_agent")
+            return np.concatenate([predictor_obs, pred_info])
         else:
             raise ValueError(f"Unknown agent: {agent}")
 
     def step(self, action):
         current_agent = self.agent_selection
-        label = self.labels[self.idx]
         reward = 0
 
-        # Hàm tính bonus reward theo streak
-        def get_streak_bonus(streak):
-            if streak >= 10:
-                return 2.0
-            elif streak >= 5:
-                return 1.0
-            elif streak >= 3:
-                return 0.5
-            return 0
-
-        if current_agent == "predictor_agent":
-            self.last_prediction = action
-            # Reward chính
-            if action == 1 and label == 1:
-                reward = 2.0  # TP (tăng thưởng)
-            elif action == 0 and label == 0:
-                reward = 1.2  # TN (tăng nhẹ)
-            elif action == 1 and label == 0:
-                reward = -0.7 # FP (tăng phạt)
-            elif action == 0 and label == 1:
-                reward = -2.5 # FN (tăng phạt mạnh)
-
-            # Cập nhật streak
-            if (action == label):
-                self.correct_streak[current_agent] += 1
+        if current_agent == "attacker_agent":
+            # attacker chọn loại tấn công
+            attack_type = action
+            self.current_request_vector = np.zeros(len(self.attack_types), dtype=np.float32)
+            self.current_request_vector[attack_type] = 1.0
+            self.current_label = attack_type
+            reward = 0  # reward tính ở bước action_agent
+        elif current_agent == "predictor_agent":
+            # predictor dự đoán attack(1) hoặc benign(0)
+            pred = action
+            self.last_prediction = pred
+            # reward cho predictor như bình thường (tuỳ thiết kế)
+            if pred == 1 and self.current_label > 0:
+                reward = 2.0
+            elif pred == 0 and self.current_label == 0:
+                reward = 1.0
+            elif pred == 1 and self.current_label == 0:
+                reward = -0.7
+            elif pred == 0 and self.current_label > 0:
+                reward = -2.0
             else:
-                self.correct_streak[current_agent] = 0
-
-            # Thêm bonus reward theo streak
-            bonus = get_streak_bonus(self.correct_streak[current_agent])
-            reward += bonus
-
-            # Penalty nếu hành động lặp lại nhiều lần (ví dụ 3 bước liền)
-            if self.last_actions[current_agent] == action:
-                self.correct_streak[current_agent] = max(self.correct_streak[current_agent] - 0.2, 0)
-                reward -= 0.1  # phạt nhẹ hành động lặp lại
-
-            self.last_actions[current_agent] = action
-            self._cumulative_rewards[current_agent] += reward
-
+                reward = 0
         elif current_agent == "action_agent":
-            pred = self.last_prediction
-            # Reward chính
-            if pred == 1 and action == 1:
-                reward = 2.5   # Xác nhận tấn công (tăng thưởng)
-            elif pred == 1 and action == 0:
-                reward = -3.5  # Bỏ qua tấn công (tăng phạt)
-            elif pred == 0 and action == 0:
-                reward = 1.2   # Cho qua benign đúng (tăng nhẹ)
+            # action agent quyết định block(1) hoặc allow(0)
+            act = action
+            pred = self.last_prediction if self.last_prediction is not None else 0
+
+            # reward cho action agent (vd như trước)
+            if pred == 1 and act == 1:
+                reward = 2.5
+            elif pred == 1 and act == 0:
+                reward = -3.5
+            elif pred == 0 and act == 0:
+                reward = 1.2
             else:
-                reward = -1.2  # Chặn nhầm benign (tăng phạt)
+                reward = -1.2
 
-            # Cập nhật streak
-            correct_action = ((pred == 1 and action == 1) or (pred == 0 and action == 0))
-            if correct_action:
-                self.correct_streak[current_agent] += 1
+            # reward cho attacker theo hiệu quả tấn công
+            if self.current_label > 0:  # attack
+                if act == 0:  # cho phép tấn công thành công
+                    self.rewards["attacker_agent"] = 3.0  # thưởng lớn
+                else:  # block tấn công
+                    self.rewards["attacker_agent"] = -1.0  # phạt attacker
             else:
-                self.correct_streak[current_agent] = 0
+                self.rewards["attacker_agent"] = 0  # benign không thưởng phạt
 
-            # Bonus reward
-            bonus = get_streak_bonus(self.correct_streak[current_agent])
-            reward += bonus
-
-            # Phạt nếu action lặp lại nhiều lần
-            if self.last_actions[current_agent] == action:
-                self.correct_streak[current_agent] = max(self.correct_streak[current_agent] - 0.2, 0)
-                reward -= 0.1
-
-            self.last_actions[current_agent] = action
-            self._cumulative_rewards[current_agent] += reward
-
-            # Chuyển sang mẫu tiếp theo
-            self.idx += 1
             self.step_count += 1
-            if self.idx >= len(self.features) or self.step_count >= self.max_steps:
+
+            if self.step_count >= self.max_steps:
                 self.terminations = {agent: True for agent in self.agents}
                 self.agents = []
 
         self.rewards[current_agent] = reward
+        self._cumulative_rewards[current_agent] += reward
         self.agent_selection = self.agent_selector.next()
         self._was_last_step = True
 
     def render(self, mode="human"):
-        if self.agent_selection is None or self.idx >= len(self.features):
+        if self.agent_selection is None:
             return
-        obs_to_render = self.observe(self.agent_selection)
-        print(f"Step: {self.idx}, Agent: {self.agent_selection}, Observation shape: {obs_to_render.shape if obs_to_render is not None else None}, Rewards: {self.rewards}")
+        print(f"Agent: {self.agent_selection}, Reward: {self.rewards.get(self.agent_selection, None)}")
+
 
     def close(self):
         pass

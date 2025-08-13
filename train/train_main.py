@@ -55,7 +55,10 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    env = CloudSecurityEnv(max_steps=500)
+    env = CloudSecurityEnv(
+        dataset_path="data/processed/cic2018_processed.parquet",
+        max_steps=500
+    )
 
     agents = {
         "predictor_agent": BaseDQNAgent(env.action_spaces["predictor_agent"], env.observation_spaces["predictor_agent"].shape[0], device=device),
@@ -76,19 +79,22 @@ if __name__ == "__main__":
         last_obs = {agent: env.observe(agent) for agent in agents}
         last_action = {}
         ep_rewards = {agent: 0.0 for agent in agents}
+        last_reward = {agent: 0.0 for agent in agents}
 
         for agent in env.agent_iter():
-            if agent not in agents:  # skip attacker_agent
-                env.step(0)  # dummy action
-                continue
-
             obs, reward, term, trunc, info = env.last()
             done = term or trunc
 
+            if agent not in agents:
+                env.step(0)
+                continue
+
+            # Cộng phần reward mới phát sinh kể từ lần gọi trước
+            ep_rewards[agent] += reward - last_reward[agent]
+            last_reward[agent] = reward
+
             action = agents[agent].act(obs)
             env.step(action)
-
-            ep_rewards[agent] += reward
 
             # Update replay memory
             if agent in last_obs and agent in last_action:
@@ -99,7 +105,6 @@ if __name__ == "__main__":
             last_action[agent] = action
 
         total_reward_PA = ep_rewards["predictor_agent"] + ep_rewards["action_agent"]
-
         # Log to CSV
         log_to_csv(RESULTS_CSV, episode,
                    ep_rewards["predictor_agent"],

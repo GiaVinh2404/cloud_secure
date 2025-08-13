@@ -3,3 +3,7 @@ inference_results.csv
 data
 __pycache__
 checkpoints
+myenv
+merged.csv
+train_results.csv
+request_logs.csv

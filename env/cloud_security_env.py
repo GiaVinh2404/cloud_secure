@@ -4,6 +4,7 @@ import pandas as pd
 from gymnasium.spaces import Discrete, Box
 from pettingzoo.utils import agent_selector
 from pettingzoo.utils.env import AECEnv
+import os
 
 class CloudSecurityEnv(AECEnv):
     metadata = {"render_modes": ["human"]}
@@ -12,26 +13,36 @@ class CloudSecurityEnv(AECEnv):
         super().__init__()
         self.max_steps = max_steps
 
-        # Load dataset từ CSV
+        # Load dataset từ Parquet hoặc CSV, chỉ giữ DataFrame
         if dataset_path:
-            df = pd.read_csv(dataset_path)
-            # Giả sử cột cuối cùng là "Label" với 0=normal, 1=malicious
-            self.dataset = [
-                {"features": row[:-1].values.astype(np.float32), "label": int(row[-1])}
-                for _, row in df.iterrows()
-            ]
+            ext = os.path.splitext(dataset_path)[-1].lower()
+            if ext == ".parquet":
+                df = pd.read_parquet(dataset_path)
+            elif ext == ".csv":
+                df = pd.read_csv(dataset_path)
+            else:
+                raise ValueError("Unsupported file format for dataset_path")
+
+            feature_cols = [c for c in df.columns if c.lower() != "label"]
+            self.df = df
+            self.feature_cols = feature_cols
         else:
-            self.dataset = self._generate_dummy_data()
+            # Dummy data
+            self.df = pd.DataFrame(
+                np.random.rand(20, 10), columns=[f"f{i}" for i in range(10)]
+            )
+            self.df["Label"] = [0]*10 + [1]*10
+            self.feature_cols = [f"f{i}" for i in range(10)]
 
         # Loại request: 0 = normal, 1 = malicious
         self.attack_types = {0: "normal", 1: "malicious"}
 
         # Agents
         self.possible_agents = ["attacker_agent", "predictor_agent", "action_agent"]
-        self.agent_selector = agent_selector.AgentSelector(self.possible_agents)
+        self.agent_selector = agent_selector(self.possible_agents)
 
         # Observation spaces
-        feature_dim = len(self.dataset[0]["features"])
+        feature_dim = len(self.feature_cols)
         self.observation_spaces = {
             "attacker_agent": Box(low=0, high=1, shape=(2,), dtype=np.float32),
             "predictor_agent": Box(low=-np.inf, high=np.inf, shape=(feature_dim,), dtype=np.float32),
@@ -76,27 +87,21 @@ class CloudSecurityEnv(AECEnv):
 
     def observe(self, agent):
         if agent == "attacker_agent":
-            # One-hot vector: attacker chỉ thấy loại request đã gửi
             obs = np.zeros(2, dtype=np.float32)
             obs[self.current_label] = 1.0
             return obs
 
         elif agent == "predictor_agent":
-            # Nếu chưa có sample, trả về zeros
             if self.current_sample is None:
-                return np.zeros_like(self.dataset[0]["features"], dtype=np.float32)
+                return np.zeros(len(self.feature_cols), dtype=np.float32)
             return self.current_sample["features"]
 
         elif agent == "action_agent":
-            # Thông tin prediction gần nhất
             pred_info = np.array([self.last_prediction if self.last_prediction is not None else 0], dtype=np.float32)
-
-            # Nếu chưa có sample, trả về zeros cho phần features
             if self.current_sample is None:
-                obs_features = np.zeros(self.observation_spaces["action_agent"].shape[0]-1, dtype=np.float32)
+                obs_features = np.zeros(len(self.feature_cols), dtype=np.float32)
             else:
                 obs_features = self.current_sample["features"]
-
             return np.concatenate([obs_features, pred_info])
 
         else:
@@ -107,38 +112,40 @@ class CloudSecurityEnv(AECEnv):
         reward = 0
 
         if current_agent == "attacker_agent":
-            # Chọn loại request
             label_choice = action
-            candidates = [d for d in self.dataset if d["label"] == label_choice]
-            self.current_sample = random.choice(candidates)
+            candidates = self.df[self.df["Label"] == label_choice]
+            row = candidates.sample(1).iloc[0]
+            self.current_sample = {
+                "features": row[self.feature_cols].values.astype(np.float32),
+                "label": int(row["Label"])
+            }
             self.current_label = self.current_sample["label"]
 
         elif current_agent == "predictor_agent":
             pred = action
             self.last_prediction = pred
-            if pred == 1 and self.current_label == 1:  # detect malicious
+            if pred == 1 and self.current_label == 1:
                 reward = 2.0
-            elif pred == 0 and self.current_label == 0:  # detect normal
+            elif pred == 0 and self.current_label == 0:
                 reward = 1.0
-            elif pred == 1 and self.current_label == 0:  # false positive
+            elif pred == 1 and self.current_label == 0:
                 reward = -0.7
-            elif pred == 0 and self.current_label == 1:  # miss malicious
+            elif pred == 0 and self.current_label == 1:
                 reward = -2.0
 
         elif current_agent == "action_agent":
             act = action
             pred = self.last_prediction if self.last_prediction is not None else 0
 
-            if pred == 1 and act == 1:  # correct block
+            if pred == 1 and act == 1:
                 reward = 2.5
-            elif pred == 1 and act == 0:  # detect attack but allow
+            elif pred == 1 and act == 0:
                 reward = -3.5
-            elif pred == 0 and act == 0:  # allow normal
+            elif pred == 0 and act == 0:
                 reward = 1.2
-            else:  # allow attack or block normal
+            else:
                 reward = -1.2
 
-            # Attacker reward: tấn công qua mặt
             if self.current_label == 1 and act == 0:
                 self.rewards["attacker_agent"] = 3.0
             elif self.current_label == 1 and act == 1:
@@ -147,6 +154,7 @@ class CloudSecurityEnv(AECEnv):
                 self.rewards["attacker_agent"] = 0
 
             self.step_count += 1
+            print(f"Step count: {self.step_count}")  # Thêm dòng này để kiểm tra
             if self.step_count >= self.max_steps:
                 self.terminations = {agent: True for agent in self.agents}
                 self.agents = []

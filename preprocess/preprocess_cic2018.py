@@ -1,6 +1,7 @@
 """
 Tiền xử lý dữ liệu CSE-CIC-IDS2018:
-- Đọc tất cả file CSV trong data/raw
+- Đọc file merged.csv ở thư mục gốc dự án theo từng chunk nhỏ (tránh hết RAM)
+- Nếu dòng nào lỗi format sẽ tự động bỏ qua, không tiền xử lý dòng đó
 - Chuẩn hóa tên cột
 - Loại bỏ cột không cần
 - Chuẩn hóa label (0: Benign, 1: Attack)
@@ -14,9 +15,8 @@ import os
 import numpy as np
 import pandas as pd
 from fastai.tabular.all import df_shrink
-from fastcore.parallel import parallel
 
-RAW_DATA_DIR = "data/raw"
+MERGED_CSV_PATH = "merged.csv"
 PROCESSED_DATA_DIR = "data/processed"
 os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
@@ -33,70 +33,45 @@ drop_columns = [
 ]
 
 def normalize_label(label):
-    """Chuyển label về 0 (Benign) và 1 (Attack)"""
     if str(label).strip().lower() in ["benign", "benign\n", "0", "normal"]:
         return 0
     return 1
 
-def process_csv(path):
-    print(f"📂 Đang xử lý: {path}")
-    df = pd.read_csv(path, sep=",", encoding="utf-8")
-    df.columns = df.columns.str.strip()
-    df.rename(columns=col_name_consistency, inplace=True)
-    df.drop(columns=drop_columns, inplace=True, errors="ignore")
-
-    # Chuẩn hóa label
-    df['Label'] = df['Label'].replace({'BENIGN': 'Benign'})
-    df['Label'] = df['Label'].apply(normalize_label)
-
-    # Ép toàn bộ các cột (trừ Label) về float nếu có thể, nếu không thì về string
-    for col in df.columns:
-        if col != 'Label':
-            try:
-                df[col] = pd.to_numeric(df[col], errors='raise')
-            except Exception:
-                df[col] = df[col].astype(str)
-
-    # Xử lý cột Protocol: giữ dạng string hoặc int an toàn
-    if 'Protocol' in df.columns:
-        try:
-            df['Protocol'] = pd.to_numeric(df['Protocol'], errors='raise').astype(np.int32)
-        except Exception:
-            df['Protocol'] = df['Protocol'].astype(str)
-
-    # Loại bỏ giá trị vô cực và NaN
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.dropna(inplace=True)
-
-    # Xóa trùng lặp
-    df.drop_duplicates(inplace=True)
-    df.reset_index(drop=True, inplace=True)
-
-    # Thu gọn dtype
-    df = df_shrink(df)
-
-    # Lưu parquet
-    filename = os.path.basename(path).replace(".csv", ".parquet")
-    save_path = os.path.join(PROCESSED_DATA_DIR, filename)
-    df.to_parquet(save_path, index=False, engine="pyarrow")
-    print(f"✅ Lưu xong: {save_path}")
-    return save_path
+def process_csv_in_chunks(path, chunk_size=200_000):
+    chunk_paths = []
+    chunk_iter = pd.read_csv(
+        path, sep=",", encoding="utf-8", on_bad_lines='skip', low_memory=False, chunksize=chunk_size
+    )
+    for i, chunk in enumerate(chunk_iter):
+        chunk.columns = chunk.columns.str.strip()
+        chunk.rename(columns=col_name_consistency, inplace=True)
+        chunk.drop(columns=drop_columns, inplace=True, errors="ignore")
+        chunk['Label'] = chunk['Label'].replace({'BENIGN': 'Benign'})
+        chunk['Label'] = chunk['Label'].apply(normalize_label)
+        for col in chunk.columns:
+            if col != 'Label':
+                chunk[col] = pd.to_numeric(chunk[col], errors='coerce')
+        if 'Protocol' in chunk.columns:
+            chunk['Protocol'] = pd.to_numeric(chunk['Protocol'], errors='coerce').astype('Int32')
+        chunk.replace([np.inf, -np.inf], np.nan, inplace=True)
+        chunk.dropna(inplace=True)
+        chunk.drop_duplicates(inplace=True)
+        chunk.reset_index(drop=True, inplace=True)
+        chunk = df_shrink(chunk)
+        chunk_path = os.path.join(PROCESSED_DATA_DIR, f"chunk_{i}.parquet")
+        chunk.to_parquet(chunk_path, index=False, engine="pyarrow")
+        print(f"✅ Đã lưu chunk: {chunk_path}")
+        chunk_paths.append(chunk_path)
+    return chunk_paths
 
 if __name__ == "__main__":
-    csv_files = [
-        os.path.join(RAW_DATA_DIR, f)
-        for f in os.listdir(RAW_DATA_DIR)
-        if f.endswith(".csv")
-    ]
-
-    if not csv_files:
-        print("⚠ Không tìm thấy file CSV trong thư mục data/raw")
+    if not os.path.exists(MERGED_CSV_PATH):
+        print("⚠ Không tìm thấy file merged.csv ở thư mục gốc dự án")
     else:
-        processed_paths = parallel(process_csv, csv_files, progress=True)
+        chunk_paths = process_csv_in_chunks(MERGED_CSV_PATH, chunk_size=200_000)
         # Gộp lại thành 1 file parquet lớn và cân bằng dữ liệu nếu cần
-        dfs = [pd.read_parquet(p) for p in processed_paths]
+        dfs = [pd.read_parquet(p) for p in chunk_paths]
         df_all = pd.concat(dfs, ignore_index=True)
-        # Cân bằng dữ liệu (optional, nếu dữ liệu lệch nhiều)
         min_count = min(df_all["Label"].value_counts().values)
         df_balanced = pd.concat([
             df_all[df_all["Label"] == 0].sample(min_count, random_state=42),

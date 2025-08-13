@@ -1,213 +1,163 @@
+# train_main.py (checkpoint theo reward action + predictor)
+
 import os
 import time
+import csv
+import numpy as np
 import matplotlib.pyplot as plt
 import torch
 from env.cloud_security_env import CloudSecurityEnv
 from agents.base_dqn_agent import BaseDQNAgent
 
 CHECKPOINT_DIR = "checkpoints"
+RESULTS_CSV = "train_results.csv"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-def visualize_history(predictor_history, action_history, attacker_history, reward_history, episode):
-    plt.figure(figsize=(18, 5))
+# ===== Visualization helper =====
+def visualize_history(reward_history, episode):
+    episodes = np.arange(1, len(reward_history) + 1)
 
-    # Tổng số actions theo episode của từng agent
-    plt.subplot(1, 3, 1)
-    plt.plot([sum(ep) for ep in predictor_history], label='Predictor Agent', color='blue')
-    plt.plot([sum(ep) for ep in action_history], label='Action Agent', color='orange')
-    plt.plot([sum(ep) for ep in attacker_history], label='Attacker Agent', color='red')
-    plt.xlabel('Episode')
-    plt.ylabel('Sum of Actions')
-    plt.title(f'Action Summary up to Episode {episode+1}')
-    plt.legend(loc="upper right")
+    # Tính reward từng agent
+    attacker_rewards = [r['attacker_agent'] for r in reward_history]
+    predictor_rewards = [r['predictor_agent'] for r in reward_history]
+    action_rewards = [r['action_agent'] for r in reward_history]
+    predictor_action_total = [p + a for p, a in zip(predictor_rewards, action_rewards)]
 
-    # Tổng reward toàn môi trường theo episode
-    plt.subplot(1, 3, 2)
-    total_rewards = [r.get('predictor_agent', 0) + r.get('action_agent', 0) for r in reward_history]
-    plt.plot(total_rewards, label='Total Reward (Predictor+Action)', color='green')
-    plt.xlabel('Episode')
-    plt.ylabel('Total Reward')
-    plt.title('Reward Progress')
-    plt.legend(loc="upper right")
+    plt.figure(figsize=(14, 10))
 
-    # Reward theo từng agent riêng biệt
-    plt.subplot(1, 3, 3)
-    plt.plot(range(len(reward_history)), [r.get('predictor_agent', 0) for r in reward_history], label='Reward Predictor', color='blue')
-    plt.plot(range(len(reward_history)), [r.get('action_agent', 0) for r in reward_history], label='Reward Action', color='orange')
-    plt.plot(range(len(reward_history)), [r.get('attacker_agent', 0) for r in reward_history], label='Reward Attacker', color='red')
-    plt.xlabel('Episode')
-    plt.ylabel('Reward per Agent')
-    plt.title('Agent Rewards')
-    plt.legend(loc="upper right")
+    # --- Biểu đồ 1: Attacker ---
+    plt.subplot(2, 2, 1)
+    plt.plot(episodes, attacker_rewards, color="red")
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.title("Attacker Agent Reward per Episode")
+    plt.grid(True, linestyle="--", alpha=0.5)
+
+    # --- Biểu đồ 2: Predictor ---
+    plt.subplot(2, 2, 2)
+    plt.plot(episodes, predictor_rewards, color="blue")
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.title("Predictor Agent Reward per Episode")
+    plt.grid(True, linestyle="--", alpha=0.5)
+
+    # --- Biểu đồ 3: Action ---
+    plt.subplot(2, 2, 3)
+    plt.plot(episodes, action_rewards, color="orange")
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.title("Action Agent Reward per Episode")
+    plt.grid(True, linestyle="--", alpha=0.5)
+
+    # --- Biểu đồ 4: Predictor + Action ---
+    plt.subplot(2, 2, 4)
+    plt.plot(episodes, predictor_action_total, color="green")
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.title("Predictor + Action Total Reward per Episode")
+    plt.grid(True, linestyle="--", alpha=0.5)
 
     plt.tight_layout()
     plt.show()
-    plt.close()
+
+# ===== CSV Logger =====
+def init_csv_logger(path):
+    with open(path, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Episode", "AttackerReward", "PredictorReward", "ActionReward", "TotalReward",
+                         "AttackerEps", "PredictorEps", "ActionEps"])
+
+def log_to_csv(path, episode, att_r, pred_r, act_r, total_r, eps_att, eps_pred, eps_act):
+    with open(path, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([episode, att_r, pred_r, act_r, total_r, eps_att, eps_pred, eps_act])
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    env = CloudSecurityEnv(max_steps=1000)
-    print("Environment initialized.")
+    # Init env & agents
+    env = CloudSecurityEnv(max_steps=500)
+    agents = {
+        "attacker_agent": BaseDQNAgent(env.action_spaces["attacker_agent"], env.observation_spaces["attacker_agent"].shape[0], device=device),
+        "predictor_agent": BaseDQNAgent(env.action_spaces["predictor_agent"], env.observation_spaces["predictor_agent"].shape[0], device=device),
+        "action_agent": BaseDQNAgent(env.action_spaces["action_agent"], env.observation_spaces["action_agent"].shape[0], device=device)
+    }
 
-    attacker_agent = BaseDQNAgent(
-        action_space=env.action_spaces['attacker_agent'],
-        obs_size=env.observation_spaces['attacker_agent'].shape[0],
-        device=device
-    )
-    print("Attacker agent initialized.")
+    # Checkpoint paths
+    ckpt_paths = {name: os.path.join(CHECKPOINT_DIR, f"{name}_best.pth") for name in agents}
 
-    predictor_agent = BaseDQNAgent(
-        action_space=env.action_spaces['predictor_agent'],
-        obs_size=env.observation_spaces['predictor_agent'].shape[0],
-        device=device
-    )
-    print("Predictor agent initialized.")
+    # CSV log init
+    init_csv_logger(RESULTS_CSV)
 
-    action_agent = BaseDQNAgent(
-        action_space=env.action_spaces['action_agent'],
-        obs_size=env.observation_spaces['action_agent'].shape[0],
-        device=device
-    )
-    print("Action agent initialized.")
-
-    attacker_ckpt_path = os.path.join(CHECKPOINT_DIR, "attacker_agent_best.pth")
-    predictor_ckpt_path = os.path.join(CHECKPOINT_DIR, "predictor_agent_best.pth")
-    action_ckpt_path = os.path.join(CHECKPOINT_DIR, "action_agent_best.pth")
-
-    if os.path.exists(attacker_ckpt_path):
-        attacker_agent.load(attacker_ckpt_path)
-        print("Loaded attacker agent from checkpoint.")
-    else:
-        print("Attacker agent checkpoint not found.")
-
-    if os.path.exists(predictor_ckpt_path):
-        predictor_agent.load(predictor_ckpt_path)
-        print("Loaded predictor agent from checkpoint.")
-    else:
-        print("Predictor agent checkpoint not found.")
-
-    if os.path.exists(action_ckpt_path):
-        action_agent.load(action_ckpt_path)
-        print("Loaded action agent from checkpoint.")
-    else:
-        print("Action agent checkpoint not found.")
-
-    num_episodes = 100
-    predictor_history = []
-    action_history = []
-    attacker_history = []
+    # Training params
+    num_episodes = 200
+    best_total_reward_PA = -float("inf")  # best predictor + action reward
     reward_history = []
 
-    best_total_reward = None
-    best_episode = None
-
-    for episode in range(num_episodes):
-        print(f"\n=== Episode {episode+1} ===")
+    for episode in range(1, num_episodes+1):
         start_time = time.time()
-
-        episode_predictor = []
-        episode_action = []
-        episode_attacker = []
-
-        correct_predictor = 0
-        total_predictor = 0
-        correct_action = 0
-        total_action = 0
-
         env.reset()
-        last_obs = {}
-        last_action = {}
-        step_count = 0
 
-        # Cộng dồn reward cho từng agent trong episode
-        episode_reward_predictor = 0
-        episode_reward_action = 0
-        episode_reward_attacker = 0
+        ep_rewards = {name: 0.0 for name in agents}
+        last_obs, last_action = {}, {}
 
         for agent in env.agent_iter():
-            observation, reward, termination, truncation, info = env.last()
-            done = termination or truncation
+            obs, reward, term, trunc, info = env.last()
+            done = term or trunc
 
-            if agent == 'predictor_agent':
-                action = predictor_agent.act(observation)
-                episode_predictor.append(action)
-                label = getattr(env, 'current_label', 0)
-                if action == label:
-                    correct_predictor += 1
-                total_predictor += 1
-                episode_reward_predictor += reward
-            elif agent == 'action_agent':
-                action = action_agent.act(observation)
-                episode_action.append(action)
-                pred = getattr(env, 'last_prediction', 0)
-                if (pred == 1 and action == 1) or (pred == 0 and action == 0):
-                    correct_action += 1
-                total_action += 1
-                episode_reward_action += reward
-            elif agent == 'attacker_agent':
-                action = attacker_agent.act(observation)
-                episode_attacker.append(action)
-                episode_reward_attacker += reward
+            action = agents[agent].act(obs)
+            env.step(action)
 
-            # Ghi nhớ trạng thái trước, để replay
+            ep_rewards[agent] += reward
+
+            # Reward shaping cho attacker
+            if agent == "action_agent":
+                label = env.current_label
+                if label > 0 and action == 0:  # attack success
+                    ep_rewards["attacker_agent"] += 3.0
+                elif label > 0 and action == 1:  # blocked
+                    ep_rewards["attacker_agent"] -= 1.0
+                elif label == 0 and action == 1:  # false positive
+                    ep_rewards["attacker_agent"] += 0.5
+                elif label == 0 and action == 0:  # benign allowed
+                    ep_rewards["attacker_agent"] += 0.2
+
+            # Replay memory update
             if agent in last_obs:
-                if agent == 'predictor_agent':
-                    predictor_agent.remember(last_obs[agent], last_action[agent], reward, observation, done)
-                elif agent == 'action_agent':
-                    action_agent.remember(last_obs[agent], last_action[agent], reward, observation, done)
-                elif agent == 'attacker_agent':
-                    attacker_agent.remember(last_obs[agent], last_action[agent], reward, observation, done)
+                agents[agent].remember(last_obs[agent], last_action[agent], reward, obs, done)
+                agents[agent].replay(64)
 
-            last_obs[agent] = observation
+            last_obs[agent] = obs
             last_action[agent] = action
 
-            env.step(action)
-            step_count += 1
+        total_reward = sum(ep_rewards.values())
+        total_reward_PA = ep_rewards["predictor_agent"] + ep_rewards["action_agent"]
 
-            # Replay ngay sau mỗi bước cho agent tương ứng
-            if agent == 'predictor_agent':
-                predictor_agent.replay(64)
-            elif agent == 'action_agent':
-                action_agent.replay(64)
-            elif agent == 'attacker_agent':
-                attacker_agent.replay(64)
+        # Save CSV log
+        log_to_csv(RESULTS_CSV, episode, ep_rewards["attacker_agent"], ep_rewards["predictor_agent"], ep_rewards["action_agent"],
+                   total_reward, agents["attacker_agent"].epsilon, agents["predictor_agent"].epsilon, agents["action_agent"].epsilon)
 
-        print(f"Episode {episode+1} finished. Steps: {step_count}")
-        print(f"Attacker steps taken: {len(episode_attacker)}")
+        # Track history
+        reward_history.append(ep_rewards)
 
-        if (episode + 1) % 5 == 0:
-            predictor_agent.update_target()
-            action_agent.update_target()
-            attacker_agent.update_target()
-            print("Target networks updated.")
+        # Save best checkpoint based on Predictor + Action reward
+        if total_reward_PA > best_total_reward_PA:
+            best_total_reward_PA = total_reward_PA
+            agents["predictor_agent"].save(ckpt_paths["predictor_agent"])
+            agents["action_agent"].save(ckpt_paths["action_agent"])
+            print(f"[EP {episode}] New best Predictor+Action reward {best_total_reward_PA:.2f}, saved checkpoints.")
 
-        rewards = env.rewards
-        print(f"Episode {episode+1}: Rewards: {{'attacker_agent': {episode_reward_attacker}, 'predictor_agent': {episode_reward_predictor}, 'action_agent': {episode_reward_action}}}")
+        # Update target networks every 5 episodes
+        if episode % 5 == 0:
+            for ag in agents.values():
+                ag.update_target()
 
-        predictor_history.append(episode_predictor)
-        action_history.append(episode_action)
-        attacker_history.append(episode_attacker)
-        reward_history.append({
-            'predictor_agent': episode_reward_predictor,
-            'action_agent': episode_reward_action,
-            'attacker_agent': episode_reward_attacker
-        })
-
-        # Chỉ cộng reward của predictor_agent và action_agent để lưu checkpoint
-        total_reward = episode_reward_predictor + episode_reward_action
-        if best_total_reward is None or total_reward > best_total_reward:
-            best_total_reward = total_reward
-            best_episode = episode + 1
-            predictor_agent.save(predictor_ckpt_path)
-            action_agent.save(action_ckpt_path)
-            attacker_agent.save(attacker_ckpt_path)
-            print(f"Saved best checkpoint at episode {best_episode} with total reward {best_total_reward}.")
-
-        if (episode + 1) % 10 == 0:
-            visualize_history(predictor_history, action_history, attacker_history, reward_history, episode)
-            print(f"Best checkpoint so far: episode {best_episode} with total reward {best_total_reward}")
+        # Visualization every 20 episodes
+        if episode % 20 == 0:
+            visualize_history(reward_history, episode)
 
         elapsed = time.time() - start_time
-        print(f"Episode {episode+1} time: {elapsed:.2f} seconds")
+        print(f"[EP {episode}] R_att={ep_rewards['attacker_agent']:.2f}, R_pred={ep_rewards['predictor_agent']:.2f}, R_act={ep_rewards['action_agent']:.2f}, Total={total_reward:.2f}, Time={elapsed:.1f}s")
+
+    print("Training finished. Results saved to", RESULTS_CSV)

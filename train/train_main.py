@@ -40,7 +40,6 @@ def visualize_history(reward_history):
 
 # ===== CSV Logger =====
 def init_csv_logger(path):
-    # Chỉ tạo mới file nếu chưa tồn tại
     if not os.path.exists(path):
         with open(path, mode='w', newline='') as f:
             writer = csv.writer(f)
@@ -67,19 +66,22 @@ if __name__ == "__main__":
         "action_agent": BaseDQNAgent(env.action_spaces["action_agent"], env.observation_spaces["action_agent"].shape[0], device=device)
     }
 
-    ckpt_paths = {name: os.path.join(CHECKPOINT_DIR, f"{name}_best.pth") for name in agents}
+    # Use a single, shared checkpoint to store all agent states and metadata
+    checkpoint_path = os.path.join(CHECKPOINT_DIR, "best_combined_checkpoint.pth")
+    best_total_reward_PA = -float("inf")
 
     # ===== Load checkpoint =====
-    best_total_reward_PA = -float("inf")
-    for name, agent in agents.items():
-        if os.path.exists(ckpt_paths[name]):
-            agent.load(ckpt_paths[name])
-            print(f"[INFO] Loaded checkpoint for {name} from {ckpt_paths[name]}")
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        agents["predictor_agent"].load_state_dict(checkpoint["predictor_agent"])
+        agents["action_agent"].load_state_dict(checkpoint["action_agent"])
+        best_total_reward_PA = checkpoint["best_total_reward_PA"]
+        print(f"[INFO] Loaded combined checkpoint from {checkpoint_path} with best total reward: {best_total_reward_PA:.2f}")
 
     # ===== CSV =====
     init_csv_logger(RESULTS_CSV)
 
-    num_episodes = 200  # số episode train thêm
+    num_episodes = 200
     reward_history = []
 
     for episode in range(1, num_episodes + 1):
@@ -127,8 +129,12 @@ if __name__ == "__main__":
         # Save best checkpoint
         if total_reward_PA > best_total_reward_PA:
             best_total_reward_PA = total_reward_PA
-            agents["predictor_agent"].save(ckpt_paths["predictor_agent"])
-            agents["action_agent"].save(ckpt_paths["action_agent"])
+            checkpoint_data = {
+                "predictor_agent": agents["predictor_agent"].get_state(),
+                "action_agent": agents["action_agent"].get_state(),
+                "best_total_reward_PA": best_total_reward_PA,
+            }
+            torch.save(checkpoint_data, checkpoint_path)
             print(f"[EP {episode}] New best Predictor+Action reward {best_total_reward_PA:.2f}, checkpoints saved.")
 
         # Update target networks every 5 episodes
@@ -136,9 +142,9 @@ if __name__ == "__main__":
             for ag in agents.values():
                 ag.update_target()
 
-        # Visualization every 20 episodes
-        if episode % 20 == 0:
-            visualize_history(reward_history)
+        # # Visualization every 20 episodes
+        # if episode % 20 == 0:
+        #     visualize_history(reward_history)
 
         elapsed = time.time() - start_time
         print(f"Predictor Reward: {ep_rewards['predictor_agent']:.2f}")

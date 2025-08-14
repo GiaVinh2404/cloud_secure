@@ -13,7 +13,6 @@ class CloudSecurityEnv(AECEnv):
         super().__init__()
         self.max_steps = max_steps
 
-        # Load dataset từ Parquet hoặc CSV, chỉ giữ DataFrame
         if dataset_path:
             ext = os.path.splitext(dataset_path)[-1].lower()
             if ext == ".parquet":
@@ -27,21 +26,17 @@ class CloudSecurityEnv(AECEnv):
             self.df = df
             self.feature_cols = feature_cols
         else:
-            # Dummy data
             self.df = pd.DataFrame(
                 np.random.rand(20, 10), columns=[f"f{i}" for i in range(10)]
             )
             self.df["Label"] = [0]*10 + [1]*10
             self.feature_cols = [f"f{i}" for i in range(10)]
 
-        # Loại request: 0 = normal, 1 = malicious
         self.attack_types = {0: "normal", 1: "malicious"}
 
-        # Agents
         self.possible_agents = ["attacker_agent", "predictor_agent", "action_agent"]
         self.agent_selector = agent_selector(self.possible_agents)
 
-        # Observation spaces
         feature_dim = len(self.feature_cols)
         self.observation_spaces = {
             "attacker_agent": Box(low=0, high=1, shape=(2,), dtype=np.float32),
@@ -49,14 +44,12 @@ class CloudSecurityEnv(AECEnv):
             "action_agent": Box(low=-np.inf, high=np.inf, shape=(feature_dim+1,), dtype=np.float32),
         }
 
-        # Action spaces
         self.action_spaces = {
-            "attacker_agent": Discrete(2),  # 0=normal, 1=malicious
-            "predictor_agent": Discrete(2),  # 0=benign, 1=attack
-            "action_agent": Discrete(2),     # 0=allow, 1=block
+            "attacker_agent": Discrete(2),
+            "predictor_agent": Discrete(2),
+            "action_agent": Discrete(2),
         }
 
-        # State variables
         self.current_sample = None
         self.current_label = 0
         self.last_prediction = None

@@ -3,13 +3,14 @@ import csv
 import torch
 import numpy as np
 from flask import Flask, request, jsonify, render_template_string
-from gymnasium.spaces import Discrete
+from env.cloud_security_env import CloudSecurityEnv
 from agents.base_dqn_agent import BaseDQNAgent
 
+# ===== Flask App =====
 app = Flask(__name__)
 LOG_CSV = "request_logs.csv"
 
-# ===== Khởi tạo CSV log =====
+# ===== Init CSV log =====
 if not os.path.exists(LOG_CSV):
     with open(LOG_CSV, mode='w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -20,22 +21,43 @@ def log_to_csv(http_request, predictor_result, action_result):
         writer = csv.writer(f)
         writer.writerow([http_request, predictor_result, action_result])
 
-# ===== Load pretrained agents =====
+# ===== Device =====
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-predictor_agent = BaseDQNAgent(action_space=Discrete(2), obs_size=10, device=device)
-action_agent = BaseDQNAgent(action_space=Discrete(2), obs_size=11, device=device)
+# ===== Load env để lấy đúng obs_size =====
+env = CloudSecurityEnv(
+    dataset_path="data/processed/cic2018_processed.parquet",
+    max_steps=1  # chỉ cần để lấy shapes
+)
 
+# ===== Khởi tạo agents đúng kiến trúc =====
+predictor_agent = BaseDQNAgent(
+    action_space=env.action_spaces["predictor_agent"],
+    obs_size=env.observation_spaces["predictor_agent"].shape[0],
+    device=device
+)
+
+action_agent = BaseDQNAgent(
+    action_space=env.action_spaces["action_agent"],
+    obs_size=env.observation_spaces["action_agent"].shape[0],
+    device=device
+)
+
+# ===== Load checkpoints =====
 predictor_agent.load("checkpoints/predictor_agent_best.pth")
 action_agent.load("checkpoints/action_agent_best.pth")
 print("✅ Models loaded successfully.")
 
-# ===== Map HTTP request → feature vector 10 chiều =====
-def http_request_to_features(http_request: str):
-    vector = np.zeros(10, dtype=np.float32)
+# ===== Chuyển HTTP request thành feature vector 77 chiều =====
+def http_request_to_features_77(http_request: str):
+    """
+    Mapping đơn giản minh họa: 77 chiều, 1 vài index đặc biệt đánh dấu loại tấn công.
+    Trong thực tế cần map đúng preprocessing lúc train.
+    """
+    vector = np.zeros(env.observation_spaces["predictor_agent"].shape[0], dtype=np.float32)
     req_lower = http_request.lower()
 
-    # Các kiểu tấn công giả định (cùng với feature index)
+    # Ví dụ mapping cơ bản
     if "union select" in req_lower or "drop table" in req_lower:
         vector[0] = 1.0   # SQL Injection
     elif "<script>" in req_lower or "javascript:" in req_lower:
@@ -43,10 +65,10 @@ def http_request_to_features(http_request: str):
     elif "flood" in req_lower or "dos" in req_lower:
         vector[2] = 1.0   # DoS
     else:
-        vector[9] = 1.0   # Benign
+        vector[-1] = 1.0  # benign
 
-    # Noise nhỏ để giống dữ liệu huấn luyện
-    vector += np.random.rand(10) * 0.05
+    # Noise nhẹ để gần với phân phối train
+    vector += np.random.rand(vector.shape[0]) * 0.05
     return vector.astype(np.float32)
 
 # ===== API nhận request JSON =====
@@ -57,7 +79,7 @@ def predict():
         return jsonify({"error": "Missing 'http_request' field"}), 400
 
     http_request_text = data["http_request"]
-    features = http_request_to_features(http_request_text)
+    features = http_request_to_features_77(http_request_text)
 
     # Predictor agent
     pred_action = predictor_agent.act(features)
@@ -76,7 +98,7 @@ def predict():
         "action_result": act_label
     })
 
-# ===== Giao diện web =====
+# ===== Web UI =====
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -122,5 +144,6 @@ function sendRequest() {
 def home():
     return render_template_string(HTML_TEMPLATE)
 
+# ===== Main =====
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

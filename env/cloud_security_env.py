@@ -2,7 +2,7 @@ import numpy as np
 import random
 import pandas as pd
 from gymnasium.spaces import Discrete, Box
-from pettingzoo.utils import agent_selector
+from pettingzoo.utils.agent_selector import agent_selector
 from pettingzoo.utils.env import AECEnv
 import os
 
@@ -154,7 +154,6 @@ class CloudSecurityEnv(AECEnv):
                 self.rewards["attacker_agent"] = 0
 
             self.step_count += 1
-            print(f"Step count: {self.step_count}")  # Thêm dòng này để kiểm tra
             if self.step_count >= self.max_steps:
                 self.terminations = {agent: True for agent in self.agents}
                 self.agents = []

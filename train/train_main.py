@@ -40,10 +40,12 @@ def visualize_history(reward_history):
 
 # ===== CSV Logger =====
 def init_csv_logger(path):
-    with open(path, mode='w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Episode", "PredictorReward", "ActionReward", "TotalReward",
-                         "PredictorEps", "ActionEps"])
+    # Chỉ tạo mới file nếu chưa tồn tại
+    if not os.path.exists(path):
+        with open(path, mode='w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Episode", "PredictorReward", "ActionReward", "TotalReward",
+                             "PredictorEps", "ActionEps"])
 
 def log_to_csv(path, episode, pred_r, act_r, total_r, eps_pred, eps_act):
     with open(path, mode='a', newline='') as f:
@@ -66,13 +68,22 @@ if __name__ == "__main__":
     }
 
     ckpt_paths = {name: os.path.join(CHECKPOINT_DIR, f"{name}_best.pth") for name in agents}
+
+    # ===== Load checkpoint =====
+    best_total_reward_PA = -float("inf")
+    for name, agent in agents.items():
+        if os.path.exists(ckpt_paths[name]):
+            agent.load(ckpt_paths[name])
+            print(f"[INFO] Loaded checkpoint for {name} from {ckpt_paths[name]}")
+
+    # ===== CSV =====
     init_csv_logger(RESULTS_CSV)
 
-    num_episodes = 200
+    num_episodes = 200  # số episode train thêm
     reward_history = []
-    best_total_reward_PA = -float("inf")
 
     for episode in range(1, num_episodes + 1):
+        print(f"\n=== EPISODE {episode} START ===")
         start_time = time.time()
         env.reset()
 
@@ -89,14 +100,12 @@ if __name__ == "__main__":
                 env.step(0)
                 continue
 
-            # Cộng phần reward mới phát sinh kể từ lần gọi trước
             ep_rewards[agent] += reward - last_reward[agent]
             last_reward[agent] = reward
 
             action = agents[agent].act(obs)
             env.step(action)
 
-            # Update replay memory
             if agent in last_obs and agent in last_action:
                 agents[agent].remember(last_obs[agent], last_action[agent], reward, obs, done)
                 agents[agent].replay(64)
@@ -105,7 +114,7 @@ if __name__ == "__main__":
             last_action[agent] = action
 
         total_reward_PA = ep_rewards["predictor_agent"] + ep_rewards["action_agent"]
-        # Log to CSV
+
         log_to_csv(RESULTS_CSV, episode,
                    ep_rewards["predictor_agent"],
                    ep_rewards["action_agent"],
@@ -113,9 +122,9 @@ if __name__ == "__main__":
                    agents["predictor_agent"].epsilon,
                    agents["action_agent"].epsilon)
 
-        reward_history.append(ep_rewards)
+        reward_history.append(ep_rewards.copy())
 
-        # Save best checkpoint based on predictor + action reward
+        # Save best checkpoint
         if total_reward_PA > best_total_reward_PA:
             best_total_reward_PA = total_reward_PA
             agents["predictor_agent"].save(ckpt_paths["predictor_agent"])
@@ -132,6 +141,9 @@ if __name__ == "__main__":
             visualize_history(reward_history)
 
         elapsed = time.time() - start_time
-        print(f"[EP {episode}] R_pred={ep_rewards['predictor_agent']:.2f}, R_act={ep_rewards['action_agent']:.2f}, Total={total_reward_PA:.2f}, Time={elapsed:.1f}s")
+        print(f"Predictor Reward: {ep_rewards['predictor_agent']:.2f}")
+        print(f"Action Reward:    {ep_rewards['action_agent']:.2f}")
+        print(f"Total Reward:     {total_reward_PA:.2f}")
+        print(f"Time: {elapsed:.1f}s\n")
 
     print("Training finished. Results saved to", RESULTS_CSV)

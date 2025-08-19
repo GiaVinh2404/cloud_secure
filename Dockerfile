@@ -1,17 +1,26 @@
-# Sử dụng Python image
 FROM python:3.10-slim
 
-# Đặt thư mục làm việc trong container
+# Đặt thư mục làm việc
 WORKDIR /app
 
-# Copy toàn bộ code vào container
-COPY . .
+# Copy file chính và requirements
+COPY app.py .
+COPY requirements.txt .
 
-# Cài đặt thư viện Python từ requirements.txt (nếu có)
+# Copy các thư mục cần thiết cho code
+COPY agents/ ./agents/
+COPY env/ ./env/
+
+# (Tùy chọn) copy checkpoint và dataset
+COPY checkpoints/ ./checkpoints/
+COPY test/ ./test/
+COPY config/ ./config/
+
+# Cài đặt dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Mở port cho Flask (ví dụ 5000)
+# Mở port Flask
 EXPOSE 5000
 
-# Chạy ứng dụng
+# Chạy Flask
 CMD ["python", "app.py"]

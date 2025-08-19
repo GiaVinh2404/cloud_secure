@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 # ===== Định nghĩa các hằng số =====
 LOG_CSV = "network_sim_log.csv"
-DATA_PATH = "data/processed/cic2018_processed.parquet"
+DATA_PATH = "test/test.parquet"
 CHECKPOINT_PATH = "checkpoints/best_combined_checkpoint.pth"
 
 # ===== Khởi tạo CSV log nếu chưa tồn tại =====
